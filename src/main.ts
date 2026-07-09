@@ -9,6 +9,7 @@ import {
 import { TOKENS_QUERY_MODEL_DETECT, NOTICE_NORMAL, NOTICE_ERROR, NOTICE_ABORT, NOTICE_RATE_LIMIT, COMPATIBLE_SOURCE_EXTENSIONS } from './constants';
 import { wrapWithAdvancedSettings } from './llm-client-wrapper';
 import { createLLMClientFromSettingsSync, preloadLLMClientModules } from './llm-sdk/create-llm-client';
+import { requiresApiKey } from './llm-sdk/provider-guards';
 import { runSchemaAnalyze } from './schema/analyze';
 
 // v1.23.0 P1-7: AI-SDK migration. Eagerly preload SDK modules on plugin
@@ -38,6 +39,9 @@ export function createLLMClient(settings: LLMWikiSettings): LLMClient {
     provider: settings.provider,
     apiKey: settings.apiKey,
     baseUrl: settings.baseUrl,
+    region: settings.region,
+    bedrockAuthMode: settings.bedrockAuthMode,
+    awsProfile: settings.awsProfile,
   });
 
   // Wrap createMessage so user-configured advanced settings are applied.
@@ -413,7 +417,7 @@ export default class LLMWikiPlugin extends Plugin {
 
     // Migrate existing users: if they already have a working config, trust it
     if (savedData && !('llmReady' in savedData)) {
-      const hasConfig = savedData.provider && (savedData.apiKey?.trim() || savedData.provider === 'ollama') && savedData.model;
+      const hasConfig = savedData.provider && (savedData.apiKey?.trim() || !requiresApiKey(savedData)) && savedData.model;
       this.settings.llmReady = !!hasConfig;
       if (hasConfig) {
         console.debug('loadSettings: existing user with config detected, llmReady = true');
@@ -475,7 +479,9 @@ export default class LLMWikiPlugin extends Plugin {
   }
 
   initializeLLMClient() {
-    if (!this.settings.apiKey?.trim() && this.settings.provider !== 'ollama') {
+    // Providers that don't require an apiKey (ollama, lmstudio,
+    // bedrock in 'profile' mode) are handled by requiresApiKey().
+    if (requiresApiKey(this.settings) && !this.settings.apiKey?.trim()) {
       this.llmClient = null;
       return;
     }
@@ -1050,9 +1056,7 @@ export default class LLMWikiPlugin extends Plugin {
   async testLLMConnection(): Promise<{ success: boolean; message: string }> {
     const t = TEXTS[this.settings.language] || TEXTS.en;
 
-    const localNoKeyProviders = ['ollama', 'lmstudio'];
-    const isLocalNoKeyProvider = localNoKeyProviders.includes(this.settings.provider);
-    if (!isLocalNoKeyProvider && (!this.settings.apiKey || this.settings.apiKey.trim() === '')) {
+    if (requiresApiKey(this.settings) && (!this.settings.apiKey || this.settings.apiKey.trim() === '')) {
       return { success: false, message: t.errorNoApiKey || 'API Key is not configured' };
     }
 

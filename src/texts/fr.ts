@@ -51,6 +51,19 @@ export const FR_TEXTS = {
     baseUrlDescCustom: 'Obligatoire : point de terminaison compatible OpenAI personnalisé',
     baseUrlDescOverride: 'Facultatif : remplacer l\'URL de base prédéfinie',
 
+    // Amazon Bedrock region
+    regionName: 'Région AWS',
+    regionDesc: 'Région AWS pour Amazon Bedrock. La disponibilité des modèles varie selon la région.',
+
+    // Amazon Bedrock méthode d'authentification (clé Bearer vs profil AWS / SSO)
+    bedrockAuthModeName: "Méthode d'authentification",
+    bedrockAuthModeDesc: "Choisissez comment le plugin s'authentifie auprès d'Amazon Bedrock. La clé API Bearer est portable ; le profil AWS utilise vos identifiants locaux ~/.aws (y compris SSO) et se rafraîchit automatiquement.",
+    bedrockAuthModeBearer: 'Clé API Bearer',
+    bedrockAuthModeProfile: 'Profil AWS (SSO / identifiants partagés)',
+    awsProfileName: 'Nom du profil AWS',
+    awsProfileDesc: 'Le nom du profil issu de ~/.aws/config ou ~/.aws/credentials à utiliser (par défaut "default"). Nécessite que vous ayez exécuté `aws sso login` (ou configuré des identifiants statiques) dans votre terminal.',
+    awsProfilePlaceholder: 'default',
+
     // Ollama Hint
     ollamaHint: "Ollama fonctionne localement, aucune clé API n'est requise",
     lmstudioHint: 'LM Studio fonctionne localement, la clé API est facultative',

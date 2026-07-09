@@ -1,9 +1,10 @@
 import { NOTICE_NORMAL, NOTICE_ERROR, NOTICE_SHORT, CUSTOM_LIMIT_MAX, CUSTOM_LIMIT_MIN } from '../constants';
 // Settings panel UI for LLM Wiki Plugin
 
-import { App, PluginSettingTab, Setting, Notice, TFile, requestUrl, BaseComponent } from 'obsidian';
+import { App, PluginSettingTab, Setting, Notice, Platform, TFile, requestUrl, BaseComponent } from 'obsidian';
 import LLMWikiPlugin from '../main';
-import { PREDEFINED_PROVIDERS, LLMWikiSettings, WIKI_LANGUAGES, VALID_ENTITY_TAGS, VALID_CONCEPT_TAGS } from '../types';
+import { PREDEFINED_PROVIDERS, LLMWikiSettings, WIKI_LANGUAGES, VALID_ENTITY_TAGS, VALID_CONCEPT_TAGS, BEDROCK_REGIONS, BEDROCK_MODELS } from '../types';
+import { deriveBedrockAuthMode, BEDROCK_DEFAULT_REGION } from '../llm-sdk/provider-guards';
 import { TEXTS } from '../texts';
 import { FolderSuggestModal } from './modals';
 import { HistoryModal } from './history-modal';
@@ -311,6 +312,9 @@ export class LLMWikiSettingTab extends PluginSettingTab {
     const providerConfig = PREDEFINED_PROVIDERS[this.tempSettings.provider];
     const isOllama = this.tempSettings.provider === 'ollama';
     const isLmStudio = this.tempSettings.provider === 'lmstudio';
+    const isBedrock = this.tempSettings.provider === 'bedrock';
+    const bedrockAuthMode = deriveBedrockAuthMode(this.tempSettings, Platform.isMobile);
+    const isBedrockProfile = isBedrock && bedrockAuthMode === 'profile';
 
     // Provider Dropdown
     new Setting(containerEl)
@@ -329,17 +333,50 @@ export class LLMWikiSettingTab extends PluginSettingTab {
         dropdown.onChange((value) => {
           this.tempSettings.provider = value;
           this.tempSettings.llmReady = false;
-          this.tempSettings.availableModels = [];
           this.tempSettings.useCustomModel = false;
           this.tempSettings.model = '';
           const config = PREDEFINED_PROVIDERS[value];
           if (config && value !== 'custom') this.tempSettings.baseUrl = config.baseUrl;
+          if (value === 'bedrock') {
+            this.tempSettings.availableModels = [...BEDROCK_MODELS];
+            // Pre-select the first curated model so users who go
+            // straight to Test Connection don't send an empty modelId.
+            this.tempSettings.model = BEDROCK_MODELS[0];
+            this.tempSettings.region = this.tempSettings.region || BEDROCK_DEFAULT_REGION;
+          } else {
+            this.tempSettings.availableModels = [];
+          }
           this.display();
         });
       });
 
-    // API Key
-    if (!isOllama && !isLmStudio) {
+    // Bedrock auth mode toggle (Bearer key ↔ AWS Profile / SSO).
+    // Only rendered for the bedrock provider. On mobile the profile
+    // option is disabled — Obsidian mobile has no ~/.aws filesystem.
+    if (isBedrock) {
+      // Write-through the default so tab-close auto-save persists
+      // 'bearer' rather than undefined, matching what the UI shows.
+      this.tempSettings.bedrockAuthMode = bedrockAuthMode;
+      new Setting(containerEl)
+        .setName(this.getText('bedrockAuthModeName'))
+        .setDesc(this.getText('bedrockAuthModeDesc'))
+        .addDropdown(dropdown => {
+          dropdown.addOption('bearer', this.getText('bedrockAuthModeBearer'));
+          if (!Platform.isMobile) {
+            dropdown.addOption('profile', this.getText('bedrockAuthModeProfile'));
+          }
+          dropdown.setValue(bedrockAuthMode);
+          dropdown.onChange((value) => {
+            this.tempSettings.bedrockAuthMode = value as 'bearer' | 'profile';
+            this.tempSettings.llmReady = false;
+            this.display();
+          });
+        });
+    }
+
+    // API Key — hidden for Ollama/LMStudio (local, no key) and for
+    // Bedrock in Profile / SSO mode (credentials come from ~/.aws).
+    if (!isOllama && !isLmStudio && !isBedrockProfile) {
       new Setting(containerEl)
         .setName(this.getText('apiKeyName'))
         .setDesc(this.getText('apiKeyDesc'))
@@ -348,6 +385,21 @@ export class LLMWikiSettingTab extends PluginSettingTab {
             .setValue(this.tempSettings.apiKey)
             .onChange((value) => { this.tempSettings.apiKey = value; this.tempSettings.llmReady = false; });
           text.inputEl.type = 'password';
+        });
+    } else if (isBedrockProfile) {
+      // No API key needed; show the Profile Name text input in its
+      // place so the "no field at all" gap isn't confusing.
+      new Setting(containerEl)
+        .setName(this.getText('awsProfileName'))
+        .setDesc(this.getText('awsProfileDesc'))
+        .addText(text => {
+          text.setPlaceholder(this.getText('awsProfilePlaceholder'))
+            .setValue(this.tempSettings.awsProfile ?? '')
+            .onChange((value) => {
+              const trimmed = value.trim();
+              this.tempSettings.awsProfile = trimmed.length > 0 ? trimmed : undefined;
+              this.tempSettings.llmReady = false;
+            });
         });
     } else if (isLmStudio) {
       containerEl.createEl('p', {
@@ -371,6 +423,29 @@ export class LLMWikiSettingTab extends PluginSettingTab {
           .setPlaceholder(providerConfig?.baseUrl || 'https://api.example.com/v1')
           .setValue(this.tempSettings.baseUrl)
           .onChange((value) => { this.tempSettings.baseUrl = value; this.tempSettings.llmReady = false; }));
+    }
+
+    // Amazon Bedrock region — dropdown of common regions, shown only
+    // for the bedrock provider. Bedrock has no user-entered baseURL in
+    // this design (endpoint is derived from region), so this replaces
+    // the Base URL field for this provider.
+    if (isBedrock) {
+      // Write-through the default so the value shown in the dropdown matches
+      // what auto-saves on tab close. Without this, users who never touch the
+      // dropdown save `region: undefined` even though the UI shows the default.
+      const currentRegion = this.tempSettings.region || BEDROCK_DEFAULT_REGION;
+      this.tempSettings.region = currentRegion;
+      new Setting(containerEl)
+        .setName(this.getText('regionName'))
+        .setDesc(this.getText('regionDesc'))
+        .addDropdown(dropdown => {
+          BEDROCK_REGIONS.forEach(region => { dropdown.addOption(region, region); });
+          dropdown.setValue(currentRegion);
+          dropdown.onChange((value) => {
+            this.tempSettings.region = value;
+            this.tempSettings.llmReady = false;
+          });
+        });
     }
 
     // LLM execution controls (concurrency + batch delay) — Issue #81 layout refactor
@@ -416,106 +491,109 @@ export class LLMWikiSettingTab extends PluginSettingTab {
     // Model section
     new Setting(containerEl).setName(this.getText('modelSection')).setHeading();
 
-    // Fetch Models button
-    new Setting(containerEl)
-      .setName(this.getText('fetchModelsName'))
-      .setDesc(this.getText('fetchModelsDesc'))
-      .addButton(button => button
-        .setButtonText(this.getText('fetchModelsButton'))
-        .onClick(async () => {
-          button.setButtonText(this.getText('fetchingModels'));
-          button.setDisabled(true);
-          try {
-            const apiKey = isOllama ? 'ollama' : this.tempSettings.apiKey.trim();
-            const baseUrl = this.tempSettings.baseUrl?.trim() || providerConfig?.baseUrl || undefined;
-
-            // Smart filter based on provider: OpenRouter allows '/', Ollama allows ':'
-            const getModelFilter = (provider: string) => {
-              if (provider === 'openrouter') {
-                return (id: string) => !id.includes(':'); // Keep '/', filter ':'
-              } else if (provider === 'ollama') {
-                return (id: string) => !id.includes('/'); // Keep ':', filter '/'
-              } else {
-                return (id: string) => !id.includes(':') && !id.includes('/'); // Filter both
-              }
-            };
-            const modelFilter = getModelFilter(this.tempSettings.provider);
-
-            // v1.23.0 P1.5: use fetchModelsWithFallback for all providers
-            // (anthropic-compatible, openai-compatible, openai, anthropic).
-            // Unified fallback handles missing /v1 suffix (Kimi Anthropic
-            // case) — Test Connection and Fetch Models share the same
-            // module-level cache, so a resolved URL from one path
-            // applies to the other.
-            const providerForFallback =
-              this.tempSettings.provider === 'openai' ? 'openai' :
-              this.tempSettings.provider === 'anthropic' ? 'anthropic' :
-              this.tempSettings.provider as 'openai-compatible' | 'anthropic-compatible';
-
-            const fetchOneUrl = async (modelsUrl: string): Promise<string[]> => {
-              try {
-                const response = await requestUrl({
-                  url: modelsUrl,
-                  method: 'GET',
-                  headers: this.tempSettings.provider === 'anthropic' || this.tempSettings.provider === 'anthropic-compatible'
-                    ? { 'x-api-key': apiKey, 'Anthropic-Version': '2023-06-01' }
-                    : { 'Authorization': `Bearer ${apiKey}` },
-                  throw: false,
-                });
-                if (response.status >= 200 && response.status < 300) {
-                  const data = response.json as { data?: Array<{ id: string }> };
-                  if (data.data?.length) {
-                    return data.data.map((m: { id: string }) => m.id);
-                  }
-                }
-                return [];
-              } catch {
-                return [];
-              }
-            };
-
-            const effectiveBaseUrl = baseUrl ?? (
-              this.tempSettings.provider === 'anthropic' ? 'https://api.anthropic.com/v1' :
-              this.tempSettings.provider === 'openai' ? 'https://api.openai.com/v1' :
-              ''
-            );
-
-            let models: string[];
+    // Fetch Models button — hidden for Bedrock, which has no live
+    // model-list API in bearer-key mode (see BEDROCK_MODELS below).
+    if (!isBedrock) {
+      new Setting(containerEl)
+        .setName(this.getText('fetchModelsName'))
+        .setDesc(this.getText('fetchModelsDesc'))
+        .addButton(button => button
+          .setButtonText(this.getText('fetchModelsButton'))
+          .onClick(async () => {
+            button.setButtonText(this.getText('fetchingModels'));
+            button.setDisabled(true);
             try {
-              models = await fetchModelsWithFallback({
-                baseUrl: effectiveBaseUrl,
-                provider: providerForFallback,
-                fetchFn: fetchOneUrl,
-              });
-              if (models.length === 0) throw new Error('empty model list');
-            } catch {
-              throw new Error('All URL candidates failed');
-            }
+              const apiKey = isOllama ? 'ollama' : this.tempSettings.apiKey.trim();
+              const baseUrl = this.tempSettings.baseUrl?.trim() || providerConfig?.baseUrl || undefined;
 
-            this.tempSettings.availableModels = models.filter(modelFilter).sort();
-            if (this.tempSettings.availableModels.length > 0) {
-              new Notice(this.getText('fetchSuccess').replace('{}', this.tempSettings.availableModels.length.toString()), NOTICE_NORMAL);
-              if (!this.tempSettings.model || !this.tempSettings.availableModels.includes(this.tempSettings.model)) {
-                this.tempSettings.model = this.tempSettings.availableModels[0];
+              // Smart filter based on provider: OpenRouter allows '/', Ollama allows ':'
+              const getModelFilter = (provider: string) => {
+                if (provider === 'openrouter') {
+                  return (id: string) => !id.includes(':'); // Keep '/', filter ':'
+                } else if (provider === 'ollama') {
+                  return (id: string) => !id.includes('/'); // Keep ':', filter '/'
+                } else {
+                  return (id: string) => !id.includes(':') && !id.includes('/'); // Filter both
+                }
+              };
+              const modelFilter = getModelFilter(this.tempSettings.provider);
+
+              // v1.23.0 P1.5: use fetchModelsWithFallback for all providers
+              // (anthropic-compatible, openai-compatible, openai, anthropic).
+              // Unified fallback handles missing /v1 suffix (Kimi Anthropic
+              // case) — Test Connection and Fetch Models share the same
+              // module-level cache, so a resolved URL from one path
+              // applies to the other.
+              const providerForFallback =
+                this.tempSettings.provider === 'openai' ? 'openai' :
+                this.tempSettings.provider === 'anthropic' ? 'anthropic' :
+                this.tempSettings.provider as 'openai-compatible' | 'anthropic-compatible';
+
+              const fetchOneUrl = async (modelsUrl: string): Promise<string[]> => {
+                try {
+                  const response = await requestUrl({
+                    url: modelsUrl,
+                    method: 'GET',
+                    headers: this.tempSettings.provider === 'anthropic' || this.tempSettings.provider === 'anthropic-compatible'
+                      ? { 'x-api-key': apiKey, 'Anthropic-Version': '2023-06-01' }
+                      : { 'Authorization': `Bearer ${apiKey}` },
+                    throw: false,
+                  });
+                  if (response.status >= 200 && response.status < 300) {
+                    const data = response.json as { data?: Array<{ id: string }> };
+                    if (data.data?.length) {
+                      return data.data.map((m: { id: string }) => m.id);
+                    }
+                  }
+                  return [];
+                } catch {
+                  return [];
+                }
+              };
+
+              const effectiveBaseUrl = baseUrl ?? (
+                this.tempSettings.provider === 'anthropic' ? 'https://api.anthropic.com/v1' :
+                this.tempSettings.provider === 'openai' ? 'https://api.openai.com/v1' :
+                ''
+              );
+
+              let models: string[];
+              try {
+                models = await fetchModelsWithFallback({
+                  baseUrl: effectiveBaseUrl,
+                  provider: providerForFallback,
+                  fetchFn: fetchOneUrl,
+                });
+                if (models.length === 0) throw new Error('empty model list');
+              } catch {
+                throw new Error('All URL candidates failed');
               }
-              // Auto-switch from text input to dropdown on successful fetch
-              this.tempSettings.useCustomModel = false;
-            } else {
-              new Notice(this.getText('fetchFailed'), NOTICE_NORMAL);
+
+              this.tempSettings.availableModels = models.filter(modelFilter).sort();
+              if (this.tempSettings.availableModels.length > 0) {
+                new Notice(this.getText('fetchSuccess').replace('{}', this.tempSettings.availableModels.length.toString()), NOTICE_NORMAL);
+                if (!this.tempSettings.model || !this.tempSettings.availableModels.includes(this.tempSettings.model)) {
+                  this.tempSettings.model = this.tempSettings.availableModels[0];
+                }
+                // Auto-switch from text input to dropdown on successful fetch
+                this.tempSettings.useCustomModel = false;
+              } else {
+                new Notice(this.getText('fetchFailed'), NOTICE_NORMAL);
+                this.tempSettings.useCustomModel = true;
+              }
+              this.display();
+            } catch (error) {
+              const errorMsg = error instanceof Error ? error.message : String(error);
+              const category = classifyFetchError(errorMsg);
+              new Notice(this.getText(`fetchError${category}`), NOTICE_ERROR);
               this.tempSettings.useCustomModel = true;
+              this.tempSettings.availableModels = [];
+              this.display();
             }
-            this.display();
-          } catch (error) {
-            const errorMsg = error instanceof Error ? error.message : String(error);
-            const category = classifyFetchError(errorMsg);
-            new Notice(this.getText(`fetchError${category}`), NOTICE_ERROR);
-            this.tempSettings.useCustomModel = true;
-            this.tempSettings.availableModels = [];
-            this.display();
-          }
-          button.setButtonText(this.getText('fetchModelsButton'));
-          button.setDisabled(false);
-        }));
+            button.setButtonText(this.getText('fetchModelsButton'));
+            button.setDisabled(false);
+          }));
+    }
 
     // Model Selection — see renderModelField call below.
     // v1.24.0 #208 unified picker is rendered by the shared helper used
